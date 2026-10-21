@@ -1,0 +1,29 @@
+{
+  "base_lower_bound": 6275.0,
+  "capacity": 267,
+  "iterations": 31,
+  "k_fleet": 6,
+  "k_label": 6,
+  "lower_bound": 10122.166666666668,
+  "n_nodes": 21,
+  "n_states": 31,
+  "name": "uchoa-n20-3351-003",
+  "runtime_s": 2.511689309962094,
+  "solver_info": {
+    "gurobi_method": 1,
+    "gurobi_threads": 1,
+    "gurobi_version": [
+      13,
+      0,
+      1
+    ],
+    "max_iter": null,
+    "min_violation": 1e-06,
+    "oracle_tol": 1e-06,
+    "support_rule": "x_gt_0_float64",
+    "time_limit": null
+  },
+  "source_sha256": "499c33d4db198517fa2bd3099c270b4e2eaa8b8626904a4a75cda2875d81db30",
+  "termination": "closed",
+  "total_cuts": 128
+}

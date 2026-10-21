@@ -1,0 +1,46 @@
+instance,n,capacity,optimum,status,source
+cm50r1,49,200,1098,proved,Uchoa et al. (2008) Table 2
+cm50r2,49,200,974,proved,Uchoa et al. (2008) Table 2
+cm50r3,49,200,1186,proved,Uchoa et al. (2008) Table 2
+cm50r4,49,200,800,proved,Uchoa et al. (2008) Table 2
+cm50r5,49,200,928,proved,Uchoa et al. (2008) Table 2
+cm50r1,49,400,679,proved,Uchoa et al. (2008) Table 2
+cm50r2,49,400,631,proved,Uchoa et al. (2008) Table 2
+cm50r3,49,400,732,proved,Uchoa et al. (2008) Table 2
+cm50r4,49,400,564,proved,Uchoa et al. (2008) Table 2
+cm50r5,49,400,611,proved,Uchoa et al. (2008) Table 2
+cm50r1,49,800,495,proved,Uchoa et al. (2008) Table 2
+cm50r2,49,800,513,proved,Uchoa et al. (2008) Table 2
+cm50r3,49,800,532,proved,Uchoa et al. (2008) Table 2
+cm50r4,49,800,471,proved,Uchoa et al. (2008) Table 2
+cm50r5,49,800,492,proved,Uchoa et al. (2008) Table 2
+cm100r1,99,200,509,best-known,Uchoa et al. (2008) Table 4
+cm100r2,99,200,584,best-known,Uchoa et al. (2008) Table 4
+cm100r3,99,200,540,best-known,Uchoa et al. (2008) Table 4
+cm100r4,99,200,435,best-known,Uchoa et al. (2008) Table 4
+cm100r5,99,200,418,best-known,Uchoa et al. (2008) Table 4
+cm100r1,99,400,252,best-known,Uchoa et al. (2008) Table 4
+cm100r2,99,400,277,best-known,Uchoa et al. (2008) Table 4
+cm100r3,99,400,236,best-known,Uchoa et al. (2008) Table 4
+cm100r4,99,400,219,best-known,Uchoa et al. (2008) Table 4
+cm100r5,99,400,223,best-known,Uchoa et al. (2008) Table 4
+cm100r1,99,800,182,proved,Uchoa et al. (2008) Table 5
+cm100r2,99,800,179,proved,Uchoa et al. (2008) Table 5
+cm100r3,99,800,175,proved,Uchoa et al. (2008) Table 5
+cm100r4,99,800,183,proved,Uchoa et al. (2008) Table 5
+cm100r5,99,800,186,proved,Uchoa et al. (2008) Table 5
+cm200r1,199,200,994,best-known,Uchoa et al. (2008) Table 4
+cm200r2,199,200,1188,best-known,Uchoa et al. (2008) Table 4
+cm200r3,199,200,1313,best-known,Uchoa et al. (2008) Table 4
+cm200r4,199,200,917,best-known,Uchoa et al. (2008) Table 4
+cm200r5,199,200,948,best-known,Uchoa et al. (2008) Table 4
+cm200r1,199,400,391,best-known,Uchoa et al. (2008) Table 4
+cm200r2,199,400,476,best-known,Uchoa et al. (2008) Table 4
+cm200r3,199,400,559,best-known,Uchoa et al. (2008) Table 4
+cm200r4,199,400,389,best-known,Uchoa et al. (2008) Table 4
+cm200r5,199,400,418,best-known,Uchoa et al. (2008) Table 4
+cm200r1,199,800,,unknown,
+cm200r2,199,800,,unknown,
+cm200r3,199,800,,unknown,
+cm200r4,199,800,,unknown,
+cm200r5,199,800,,unknown,

@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys
+from dataclasses import replace
+from pathlib import Path
+from time import perf_counter
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parents[1] / "common" / "python"))
+sys.path.insert(0, str(_HERE))
+
+from sagsep_bc_common.protocol import validate_instance
+
+from sagsep_bc_cmst.instance import CmstInstance, load_instance
+from sagsep_bc_cmst.separators import (
+    CvrpsepCutSeparator,
+    SagSepTTSSeparator,
+    Separator,
+)
+from sagsep_bc_cmst.solver import BCOptions, BCResult, BranchAndCutSolver
+
+SEPARATOR_CHOICES = ("cvrpsep", "sagseptts")
+DEFAULT_INSTANCES_ROOT = _HERE.parents[3] / "instances" / "cmst"
+_PROVED_STATUS = "proved"
+
+
+class ManifestEntry(NamedTuple):
+    optimum: Optional[float]
+    status: str
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Branch-and-cut for the CMST with capacity-cut separation.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--separator", choices=SEPARATOR_CHOICES, required=True,
+        help="Cut source: Lysgaard's CVRPSEP heuristics, or SAG-Sep's learned separator",
+    )
+    parser.add_argument(
+        "--instance", nargs="+", required=True,
+        help="Instance names (resolved under --instances-root) or paths to .cmst files",
+    )
+    parser.add_argument(
+        "--instances-root",
+        default=os.environ.get("SAGSEP_CMST_INSTANCES", str(DEFAULT_INSTANCES_ROOT)),
+        help="Directory holding the .cmst files",
+    )
+    parser.add_argument(
+        "--capacity", type=int, default=None,
+        help="Q, one of the instance's CAPACITIES; required when it lists several",
+    )
+    parser.add_argument(
+        "--manifest", default=None,
+        help="CSV with instance,capacity,optimum,status columns "
+             "(default: manifest.csv next to the instances, if present)",
+    )
+    parser.add_argument(
+        "--optimal", type=float, default=None,
+        help="Known optimum of a single instance, recorded in its result; "
+             "overrides the manifest",
+    )
+    parser.add_argument(
+        "--run-dir", default=os.environ.get("SAGSEP_RUN_DIR", ""),
+        help="sagseptts only: checkpoint directory or .ckpt file "
+             "(default: $SAGSEP_RUN_DIR)",
+    )
+    parser.add_argument(
+        "--device", default="cpu",
+        help="sagseptts only: torch device for the policy network",
+    )
+    parser.add_argument(
+        "--size-preset", default=None,
+        help="sagseptts only: SAG-Sep preset tag (n50 … n1000); default: by instance size",
+    )
+    parser.add_argument(
+        "--cvrpsep-lib", default=None,
+        help="cvrpsep only: path to libcvrpsep.so "
+             "(default: examples/third_party/cvrpsep/libcvrpsep.so)",
+    )
+    parser.add_argument("--time-limit", type=float, default=300.0,
+                        help="Wall-clock budget per instance in seconds (0 = none)")
+    parser.add_argument("--mip-gap", type=float, default=1e-4, help="Relative MIP gap")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="Gurobi threads, and the learned separator's CPU threads")
+    parser.add_argument("--seed", type=int, default=0, help="Gurobi seed")
+    parser.add_argument("--root-rounds", type=int, default=100,
+                        help="Maximum root cutting-plane rounds (0 skips the root phase)")
+    parser.add_argument("--cuts-per-round", type=int, default=100,
+                        help="The driver's cap on heuristic rows added per separation "
+                             "round, applied to both cut sources; the exact max-flow "
+                             "rows are not capped")
+    parser.add_argument("--min-violation", type=float, default=1e-6,
+                        help="The driver's threshold: the CMST violation a row must "
+                             "exceed, applied to both cut sources after rescoring")
+    parser.add_argument("--usercut-max-nodes", type=int, default=15,
+                        help="Separate MIPNODE user cuts while the node count is at most this")
+    parser.add_argument("--padded-support", action="store_true",
+                        help="Hand the generator the padded CVRP-shaped support instead "
+                             "of the CMST point itself (study switch)")
+    parser.add_argument("--connectivity-only", action="store_true",
+                        help="Never call the generator: exact connectivity separation "
+                             "and the MIPSOL audit only")
+    parser.add_argument("--tree-commit", choices=("root", "offered"), default="offered",
+                        help="What a MIPNODE batch tells the separators: offered = the "
+                             "rows the driver offered through GRBcbcut, which is CVRPSEP's "
+                             "own convention; root = nothing, so each records only the "
+                             "permanent root rows. Applied to both cut sources")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Directory for per-instance result JSON files")
+    parser.add_argument("--quiet", dest="verbose", action="store_false",
+                        help="Suppress the Gurobi log and the per-round root trace")
+    args = parser.parse_args(argv)
+    if args.optimal is not None and len(args.instance) > 1:
+        parser.error("--optimal applies to a single instance; use the manifest for a batch")
+    if args.time_limit < 0.0:
+        parser.error("--time-limit must be non-negative (0 means no limit)")
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
+    if args.root_rounds < 0:
+        parser.error("--root-rounds must be non-negative")
+    if args.cuts_per_round < 1:
+        parser.error("--cuts-per-round must be at least 1")
+    if args.min_violation < 0.0:
+        parser.error("--min-violation must be non-negative")
+    if args.usercut_max_nodes < 0:
+        parser.error("--usercut-max-nodes must be non-negative")
+    if args.mip_gap < 0.0:
+        parser.error("--mip-gap must be non-negative")
+    return args
+
+
+def resolve_instance_path(name_or_path: str, instances_root: str) -> Path:
+    candidate = Path(name_or_path)
+    if candidate.suffix == ".cmst":
+        return candidate
+    if not str(instances_root).strip():
+        raise ValueError(
+            f"cannot resolve instance {name_or_path!r}: pass a path to a .cmst file "
+            "or set --instances-root"
+        )
+    return Path(instances_root) / f"{name_or_path}.cmst"
+
+
+def read_manifest(path: Path) -> Dict[Tuple[str, int], ManifestEntry]:
+    entries: Dict[Tuple[str, int], ManifestEntry] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            name = (row.get("instance") or "").strip()
+            capacity = (row.get("capacity") or "").strip()
+            if not name or not capacity:
+                continue
+            optimum = (row.get("optimum") or "").strip()
+            entries[(name, int(capacity))] = ManifestEntry(
+                optimum=float(optimum) if optimum else None,
+                status=(row.get("status") or "").strip(),
+            )
+    return entries
+
+
+def build_separator(args: argparse.Namespace, instance: CmstInstance) -> Separator:
+    if args.separator == "cvrpsep":
+        return CvrpsepCutSeparator(
+            instance,
+            max_cuts=args.cuts_per_round,
+            min_violation=args.min_violation,
+            tree_commit=args.tree_commit,
+            library_path=args.cvrpsep_lib,
+        )
+    if not str(args.run_dir).strip():
+        raise ValueError(
+            "--separator sagseptts needs a policy checkpoint: pass --run-dir or set "
+            "SAGSEP_RUN_DIR (a run directory, or the released .ckpt file)"
+        )
+    return SagSepTTSSeparator(
+        instance,
+        run_dir=args.run_dir,
+        device=args.device,
+        size_preset=args.size_preset,
+        threads=args.threads,
+        tree_commit=args.tree_commit,
+    )
+
+
+def format_summary(result: BCResult) -> str:
+    objective = "-" if result.objective is None else f"{result.objective:.1f}"
+    bound = "-" if result.best_bound is None else f"{result.best_bound:.1f}"
+    root = "-" if result.root_bound is None else f"{result.root_bound:.1f}"
+    match = {True: "opt-match", False: "OPT-MISMATCH", None: "opt-unknown"}[
+        result.matches_optimum
+    ]
+    return (
+        f"{result.instance_name}-Q{result.capacity}  sep={result.separator}  "
+        f"{result.status_name}  obj={objective} ({match})  bound={bound}  root={root}  "
+        f"nodes={result.node_count:.0f}  lazy={result.callback.lazy_cuts_added}  "
+        f"usercuts={result.callback.mipnode_cuts_added}  "
+        f"rootcuts={result.root_cuts}  "
+        f"connectivity_cuts={result.connectivity_cuts}  "
+        f"padding={'on' if result.padded_support else 'off'}"
+        f"{'' if not result.connectivity_only else '  connectivity-only'}  "
+        f"{result.runtime:.2f}s"
+    )
+
+
+def run_instance(args: argparse.Namespace, name_or_path: str,
+                 manifest: Dict[Tuple[str, int], ManifestEntry]) -> BCResult:
+    path = resolve_instance_path(name_or_path, args.instances_root)
+    instance = load_instance(path, capacity=args.capacity)
+    validate_instance(
+        instance.name, instance.capacity, instance.demand,
+        learned=args.separator == "sagseptts",
+        what="run_bc.py",
+        min_customer_demand=1,
+    )
+
+    optimal = args.optimal
+    if optimal is None:
+        entry = manifest.get((instance.name, instance.capacity))
+        if entry is not None and entry.status in ("", _PROVED_STATUS):
+            optimal = entry.optimum
+    instance = replace(instance, optimal=optimal)
+
+    options = BCOptions(
+        time_limit=args.time_limit if args.time_limit > 0 else None,
+        mip_gap=args.mip_gap,
+        threads=args.threads,
+        seed=args.seed,
+        root_rounds=args.root_rounds,
+        cuts_per_round=args.cuts_per_round,
+        min_violation=args.min_violation,
+        usercut_max_nodes=args.usercut_max_nodes,
+        tree_commit=args.tree_commit,
+        padded_support=args.padded_support,
+        connectivity_only=args.connectivity_only,
+        verbose=args.verbose,
+    )
+    setup_start = perf_counter()
+    separator = build_separator(args, instance)
+    with BranchAndCutSolver(
+        instance, separator, options, optimal_value=optimal,
+        setup_start=setup_start,
+    ) as solver:
+        result = solver.solve()
+
+    if args.out is not None:
+        args.out.mkdir(parents=True, exist_ok=True)
+        out_file = (
+            args.out
+            / f"bc_{instance.name}_q{instance.capacity}_{args.separator}.json"
+        )
+        with out_file.open("w", encoding="utf-8") as handle:
+            json.dump(result.as_dict(), handle, indent=2)
+    return result
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+
+    manifest: Dict[Tuple[str, int], ManifestEntry] = {}
+    manifest_path = Path(args.manifest) if args.manifest else None
+    if manifest_path is None and str(args.instances_root).strip():
+        default_manifest = Path(args.instances_root) / "manifest.csv"
+        manifest_path = default_manifest if default_manifest.is_file() else None
+    if manifest_path is not None:
+        manifest = read_manifest(manifest_path)
+
+    mismatches = 0
+    for name_or_path in args.instance:
+        result = run_instance(args, name_or_path, manifest)
+        print(format_summary(result), flush=True)
+        if result.matches_optimum is False:
+            mismatches += 1
+    return 1 if mismatches else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

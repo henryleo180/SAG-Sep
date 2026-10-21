@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sagsep"
+version = "0.1.0"
+description = "SAG-Sep: learned rounded-capacity cut separation for the CVRP, and the pipeline that trains it"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["cvrp", "cutting-planes", "rounded-capacity-cuts", "graph-transformer"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy==2.1.2",
+    "scipy==1.15.3",
+    "torch==2.8.0",
+    "PyYAML>=6.0",
+    "tomli>=2.0; python_version < \"3.11\"",
+]
+
+[project.optional-dependencies]
+train = ["onnx==1.22.0", "onnxruntime==1.23.2"]
+wandb = ["wandb>=0.22"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sagsep*", "sagsep_train*"]
+
+[tool.setuptools.package-data]
+"sagsep_train.sample" = [
+    "*.npz",
+    "*.json",
+    "*.csv",
+    "*.toml",
+    "*.vrp",
+    "*.md",
+    "labels/*.json",
+]

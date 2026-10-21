@@ -1,0 +1,41 @@
+diff --git a/packages/application/cvrp/CMakeLists.txt b/packages/application/cvrp/CMakeLists.txt
+index a5af081..831f8bc 100644
+--- a/packages/application/cvrp/CMakeLists.txt
++++ b/packages/application/cvrp/CMakeLists.txt
+@@ -84,6 +84,19 @@ if (LABEL_ASSIGN_OVERRIDE)
+     target_compile_definitions(${PROJECT_NAME} PRIVATE LABEL_ASSIGN_OVERRIDE=${LABEL_ASSIGN_OVERRIDE})
+ endif ()
+ 
++# ---------------------------------------------------------------------------
++# The application, chosen by the build (added by the SAG-Sep case study)
++# ---------------------------------------------------------------------------
++set(SAGSEP_APP_TYPE "CVRP" CACHE STRING "RouteOpt application to build: CVRP or VRPTW")
++set_property(CACHE SAGSEP_APP_TYPE PROPERTY STRINGS CVRP VRPTW)
++if (SAGSEP_APP_TYPE STREQUAL "VRPTW")
++    target_compile_definitions(${PROJECT_NAME} PRIVATE SAGSEP_APP_TYPE=VRPTW)
++    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME vrptw)
++elseif (NOT SAGSEP_APP_TYPE STREQUAL "CVRP")
++    message(FATAL_ERROR
++            "SAGSEP_APP_TYPE must be exactly CVRP or VRPTW (got \"${SAGSEP_APP_TYPE}\").")
++endif ()
++
+ 
+ target_link_libraries(${PROJECT_NAME}
+         PRIVATE
+diff --git a/packages/application/cvrp/src/main/include/cvrp_macro.hpp b/packages/application/cvrp/src/main/include/cvrp_macro.hpp
+index 4d858cc..ebdd162 100644
+--- a/packages/application/cvrp/src/main/include/cvrp_macro.hpp
++++ b/packages/application/cvrp/src/main/include/cvrp_macro.hpp
+@@ -32,7 +32,11 @@ namespace RouteOpt::Application::CVRP {
+         ML_USE_MODEL
+     };
+ 
+-    constexpr APPLICATION_TYPE app_type{APPLICATION_TYPE::CVRP};
++    /* --- added by the SAG-Sep branch-price-and-cut case study ----------- */
++#ifndef SAGSEP_APP_TYPE
++#define SAGSEP_APP_TYPE CVRP
++#endif
++    constexpr APPLICATION_TYPE app_type{APPLICATION_TYPE::SAGSEP_APP_TYPE};
+     constexpr VRPTW_TYPE vrptw_type{VRPTW_TYPE::SINGLE_RESOURCE};
+     constexpr ML_TYPE ml_type{ML_TYPE::ML_USE_MODEL};
+ 

@@ -1,0 +1,120 @@
+recipe_schema_version = 1
+
+[model]
+node_dim = 2
+edge_dim = 2
+latent_dim = 256
+n_layer = 6
+backbone_type = "transformer"
+debug = false
+
+[model.transformer_params]
+num_heads = 8
+dropout = 0.1
+use_edge_features = true
+
+[model.policy_params]
+hidden = [128, 64]
+out_act = "Identity"
+
+[data]
+dataset_dir = "data/xml100/shards"
+manifest = "dataset-manifest.json"
+train_shards = [
+    "shard_0001",
+    "shard_0002",
+    "shard_0003",
+    "shard_0004",
+    "shard_0005",
+    "shard_0006",
+    "shard_0007",
+    "shard_0008",
+]
+val_shards = ["shard_0026"]
+val_limit = 2048
+batch_size = 16
+eval_batch_size = 16
+shuffle_mode = "global"
+num_workers = 12
+drop_last = false
+pin_memory = true
+support_rule = "x_gt_0"
+depot_complete = true
+partial_connect = 2
+partial_connect_cross_depot = true
+m_value_closed_interval = true
+
+[data.partial_connect_edge_value]
+method = "max_min"
+coef = 1.0
+
+[optimizer]
+name = "Adam"
+lr = 1e-3
+weight_decay = 0.0
+betas = [0.9, 0.999]
+eps = 1e-8
+
+[scheduler]
+name = "CosineAnnealingWarmRestarts"
+T_0 = 200
+T_mult = 1
+eta_min = 1e-5
+
+[trainer]
+seed = 42
+device = "cuda:0"
+max_epochs = 500
+max_steps = 2563000
+log_every = 100
+eval_every = 500
+checkpoint_every = 1000
+loss = "BCEWithLogitsLoss"
+grad_clip_norm = 0.8
+deterministic = false
+
+[logging]
+jsonl = true
+wandb = false
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+[metadata]
+recipe = "cvrp-two-index-best"
+authoritative_source = "training snapshot of the released checkpoint"
+deviations = [
+    "PyG removed: the same operators, disjoint-union batching, verified bitwise on fixtures.",
+    "LP construction, cut rows, deduplication and the solver version can change the LP-state sequence; the new labeller is a mathematically equivalent generator, not a regeneration of the reference trajectories.",
+    "Per-M argmin membership is not canonical under ties.",
+    "Gurobi 12 -> Gurobi 13.",
+    "torch 2.4 + torch_geometric -> torch 2.8, no graph library.",
+    "Validation subset ids are persisted per run (val_record_ids.json).",
+    "The RNG is re-seeded per epoch, which makes an epoch-boundary resume reproduce an uninterrupted run bit for bit.",
+    "The reference support rule keeps every positive LP value (support_rule = x_gt_0) while inference applies the 1e-6 threshold.",
+    "stalled_duplicate is reported as its own termination instead of being folded into closure.",
+]
+verification = [
+    "Fixture-level bitwise equality of collation, loss, gradients and one Adam step against a batch captured from the historical trainer.",
+    "ONNX re-export from the source run is byte-identical to the shipped graph.",
+]
+
+[metadata.historical_run]
+steps = 2563000
+epochs_completed = 139
+wall_clock_days = 7
+hardware = "one B200 GPU, 24 CPU cores, 228 GB host memory"
+
+[metadata.historical_software]
+torch = "2.8"
+graph_library = "torch_geometric 2.6"
+solver = "Gurobi 12.0"
+
+[metadata.data]
+source = "CVRPLIB XML100 (10,000 instances of 100 customers)"
+train_instances = 3024
+train_states = 294597
+val_shard_states = 36448
+val_selected = 2048
+label_oracle = "exact rounded-capacity MILP per M"

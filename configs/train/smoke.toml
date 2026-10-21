@@ -1,0 +1,73 @@
+recipe_schema_version = 1
+
+[model]
+node_dim = 2
+edge_dim = 2
+latent_dim = 32
+n_layer = 2
+backbone_type = "transformer"
+debug = false
+
+[model.transformer_params]
+num_heads = 4
+dropout = 0.1
+use_edge_features = true
+
+[model.policy_params]
+hidden = [16]
+out_act = "Identity"
+
+[data]
+dataset_dir = "../../package/python/sagsep_train/sample"
+manifest = "dataset-manifest.json"
+train_shards = ["shard_0001"]
+val_shards = ["shard_0001"]
+val_limit = 8
+batch_size = 2
+eval_batch_size = 2
+shuffle_mode = "global"
+num_workers = 0
+drop_last = false
+pin_memory = false
+support_rule = "x_gt_0"
+depot_complete = true
+partial_connect = 2
+partial_connect_cross_depot = true
+m_value_closed_interval = true
+
+[data.partial_connect_edge_value]
+method = "max_min"
+coef = 1.0
+
+[optimizer]
+name = "Adam"
+lr = 1e-3
+weight_decay = 0.0
+betas = [0.9, 0.999]
+eps = 1e-8
+
+[scheduler]
+name = "CosineAnnealingWarmRestarts"
+T_0 = 200
+T_mult = 1
+eta_min = 1e-5
+
+[trainer]
+seed = 42
+device = "cpu"
+max_epochs = 500
+max_steps = 30
+log_every = 5
+eval_every = 10
+checkpoint_every = 10
+loss = "BCEWithLogitsLoss"
+grad_clip_norm = 0.8
+deterministic = false
+
+[logging]
+jsonl = true
+wandb = false
+
+[metadata]
+recipe = "smoke"
+purpose = "end-to-end check of the training pipeline on the packaged sample"

@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "created_by": {
+    "package": "sagsep_train",
+    "version": "0.1.0"
+  },
+  "feature_contract": "partial_2hop_max_min_v1",
+  "support_rule": "x_gt_0_float64",
+  "source": {
+    "kind": "generator",
+    "name": "sagsep_train.instances uchoa-style generator",
+    "seed": [
+      16347841621347268350,
+      12757224847418222582,
+      6443901324895677344,
+      7020815709964296853,
+      17969905217256223724,
+      7384453395784637431,
+      14067133432835801796,
+      16562539112623237932
+    ],
+    "n_customers": [
+      15,
+      20
+    ],
+    "specs": [
+      "1163",
+      "2251",
+      "2136",
+      "2141",
+      "2176",
+      "1122",
+      "2242",
+      "3351"
+    ],
+    "instances": [
+      "uchoa-n15-1163-000",
+      "uchoa-n15-2251-001",
+      "uchoa-n15-2136-002",
+      "uchoa-n15-2141-003",
+      "uchoa-n20-2176-000",
+      "uchoa-n20-1122-001",
+      "uchoa-n20-2242-002",
+      "uchoa-n20-3351-003"
+    ],
+    "generator_manifest": "manifest.csv",
+    "generator_manifest_sha256": "2ea801d7b389d9cbae0bfb07a2c8e23fffabf55d6a269f260e24de10936a1071"
+  },
+  "labeler": {
+    "version": "0.1.0",
+    "solver": "gurobi",
+    "solver_version": "13.0.1",
+    "threads": 1,
+    "lp_method": 1,
+    "tolerances": {
+      "oracle_tol": 1e-06,
+      "min_violation": 1e-06
+    },
+    "min_violation": 1e-06,
+    "max_iter": null,
+    "require_optimal": true,
+    "time_limit": null,
+    "support_rule": "x_gt_0_float64"
+  },
+  "shards": [
+    {
+      "file": "shard_0001.npz",
+      "sha256": "f3c2369abc5a5c90186a09725960b5e578fe7c2409d052441eab7c2bd534b65d",
+      "bytes": 15720,
+      "n_instances": 8,
+      "n_states": 125,
+      "split": null
+    }
+  ],
+  "counts": {
+    "instances": 8,
+    "states": 125
+  }
+}

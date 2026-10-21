@@ -1,0 +1,6 @@
+build/
+results/
+
+RouteOpt/packages/external/xgb/
+RouteOpt/packages/application/cvrp/bin/
+RouteOpt/packages/application/cvrp/lib/hgs/lib/

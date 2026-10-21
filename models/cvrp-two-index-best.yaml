@@ -1,0 +1,25 @@
+artifact_schema_version: 1
+model:
+  node_dim: 2
+  edge_dim: 2
+  latent_dim: 256
+  n_layer: 6
+  backbone_type: transformer
+  transformer_params:
+    num_heads: 8
+    dropout: 0.1
+    use_edge_features: true
+  policy_params:
+    hidden:
+    - 128
+    - 64
+    out_act: Identity
+  debug: false
+input_contract:
+  graph_builder: partial_2hop_max_min_v1
+  partial_connect_cross_depot: true
+  m_value_closed_interval: true
+provenance:
+  run_id: '20260128203512'
+  global_step: 1870000
+  checkpoint_kind: best

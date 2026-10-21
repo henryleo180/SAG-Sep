@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+/package/c/sagsep
+/package/c/sagsep_gpu
+/package/c/libsagsep.a
+results/
+*.egg-info/
+/runs/
+.pytest_cache/

@@ -1,0 +1,5 @@
+numpy==2.1.2
+networkx>=3.3
+torch==2.8.0
+PyYAML>=6.0
+tomli>=2.0; python_version < "3.11"

@@ -1,0 +1,8 @@
+instance,n,K,capacity,optimum,status,tolerance,source,distance_convention,origin
+O1,50,5,160,416.063,proved,0.0005,Letchford-Lysgaard-Eglese 2007 Table 3,euclidean_full_precision,CMT1 / E-n51-k5
+O2,75,10,140,567.14,best-known,0.005,Fleszar-Osman-Hindi 2009 Table 2,euclidean_full_precision,CMT2 / E-n76-k10
+O3,100,8,200,639.744,proved,0.0005,Letchford-Lysgaard-Eglese 2007 Table 3,euclidean_full_precision,CMT3 / E-n101-k8
+O4,150,12,200,733.13,best-known,0.005,Fleszar-Osman-Hindi 2009 Table 2,euclidean_full_precision,CMT4 / M-n151-k12
+O5,199,16,200,896.08,best-known,0.005,Fleszar-Osman-Hindi 2009 Table 2,euclidean_full_precision,CMT5 / M-n200-k16
+O6,120,7,200,682.12,best-known,0.005,Fleszar-Osman-Hindi 2009 Table 2,euclidean_full_precision,CMT11 / M-n121-k7
+O7,100,10,200,534.239,proved,0.0005,Letchford-Lysgaard-Eglese 2007 Table 3,euclidean_full_precision,CMT12 / M-n101-k10

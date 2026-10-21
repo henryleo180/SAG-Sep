@@ -1,0 +1,146 @@
+diff --git a/packages/application/cvrp/CMakeLists.txt b/packages/application/cvrp/CMakeLists.txt
+index 831f8bc..d19d0a5 100644
+--- a/packages/application/cvrp/CMakeLists.txt
++++ b/packages/application/cvrp/CMakeLists.txt
+@@ -97,6 +97,13 @@ elseif (NOT SAGSEP_APP_TYPE STREQUAL "CVRP")
+             "SAGSEP_APP_TYPE must be exactly CVRP or VRPTW (got \"${SAGSEP_APP_TYPE}\").")
+ endif ()
+ 
++set(SAGSEP_VRPTW_TYPE "SINGLE_RESOURCE" CACHE STRING
++    "VRPTW labeling mode: SINGLE_RESOURCE, TW_MAIN_RESOURCE or CAP_MAIN_RESOURCE")
++set_property(CACHE SAGSEP_VRPTW_TYPE PROPERTY STRINGS SINGLE_RESOURCE TW_MAIN_RESOURCE CAP_MAIN_RESOURCE)
++if (NOT SAGSEP_VRPTW_TYPE STREQUAL "SINGLE_RESOURCE")
++    target_compile_definitions(${PROJECT_NAME} PRIVATE SAGSEP_VRPTW_TYPE=${SAGSEP_VRPTW_TYPE})
++endif ()
++
+ 
+ target_link_libraries(${PROJECT_NAME}
+         PRIVATE
+diff --git a/packages/application/cvrp/src/main/include/cvrp_macro.hpp b/packages/application/cvrp/src/main/include/cvrp_macro.hpp
+index ebdd162..33897ae 100644
+--- a/packages/application/cvrp/src/main/include/cvrp_macro.hpp
++++ b/packages/application/cvrp/src/main/include/cvrp_macro.hpp
+@@ -37,7 +37,10 @@ namespace RouteOpt::Application::CVRP {
+ #define SAGSEP_APP_TYPE CVRP
+ #endif
+     constexpr APPLICATION_TYPE app_type{APPLICATION_TYPE::SAGSEP_APP_TYPE};
+-    constexpr VRPTW_TYPE vrptw_type{VRPTW_TYPE::SINGLE_RESOURCE};
++#ifndef SAGSEP_VRPTW_TYPE
++#define SAGSEP_VRPTW_TYPE SINGLE_RESOURCE
++#endif
++    constexpr VRPTW_TYPE vrptw_type{VRPTW_TYPE::SAGSEP_VRPTW_TYPE};
+     constexpr ML_TYPE ml_type{ML_TYPE::ML_USE_MODEL};
+ 
+     constexpr bool IF_WRITE_NODE_OUT{false};
+diff --git a/packages/application/cvrp/src/main/src/call_cutting.cpp b/packages/application/cvrp/src/main/src/call_cutting.cpp
+index 9f357b5..6c519e4 100644
+--- a/packages/application/cvrp/src/main/src/call_cutting.cpp
++++ b/packages/application/cvrp/src/main/src/call_cutting.cpp
+@@ -5,7 +5,10 @@
+  * License: GPL-3.0
+  */
+ 
++#include <cstdlib>
++#include <iostream>
+ #include <numeric>
++#include <string>
+ #include "cvrp.hpp"
+ #include "vrptw.hpp"
+ #include "rank1_data_shared.hpp"
+@@ -16,6 +19,17 @@ namespace RouteOpt::Application::CVRP {
+         bool if_node_memory = true;
+         constexpr bool if_print_tail_reason = true;
+ 
++        inline bool noRank1() {
++            static const bool enabled = [] {
++                const char *raw = std::getenv("SAGSEP_NO_RANK1");
++                const bool on = raw != nullptr && std::string(raw) == "1";
++                if (on) std::cout << "[NO_RANK1] rank-1 separation disabled; the root stops at the RCC tail-off"
++                                  << std::endl;
++                return on;
++            }();
++            return enabled;
++        }
++
+         inline void trySetInitialIfNodeMemory(const std::vector<R1c> &r1cs) {
+             if (!if_node_memory) return;
+             //node memory size must be = m(m-1)/2;
+@@ -143,7 +157,7 @@ namespace RouteOpt::Application::CVRP {
+             if (eps_max == std::numeric_limits<float>::max()) eps_max = 0.;
+             eps_max = std::max(eps_max, eps);
+             if (if_tail_off) {
+-                if (!if_pure_rcc_tail) {
++                if (!if_pure_rcc_tail && !noRank1()) {
+                     if_pure_rcc_tail = true;
+                     if_tail_off = false;
+                 }
+@@ -472,7 +486,7 @@ namespace RouteOpt::Application::CVRP {
+         );
+ 
+ 
+-        if (!CuttingDetail::if_pure_rcc_tail) goto PRICING;
++        if (CuttingDetail::noRank1() || !CuttingDetail::if_pure_rcc_tail) goto PRICING;
+ 
+ 
+     {
+@@ -504,7 +518,7 @@ namespace RouteOpt::Application::CVRP {
+                                                   CuttingDetail::if_node_memory
+                                                       ? CUTTING_BRANCHING_RATIO
+                                                       : CUTTING_BRANCHING_RATIO_LOW);
+-            if (!if_continue && CuttingDetail::if_pure_rcc_tail) {
++            if (!if_continue && (CuttingDetail::if_pure_rcc_tail || CuttingDetail::noRank1())) {
+                 goto QUIT;
+             }
+         }
+diff --git a/packages/branching/bbt/include/workflow.hpp b/packages/branching/bbt/include/workflow.hpp
+index aab2714..ae24759 100644
+--- a/packages/branching/bbt/include/workflow.hpp
++++ b/packages/branching/bbt/include/workflow.hpp
+@@ -16,10 +16,23 @@
+ #ifndef ROUTE_OPT_WORKFLOW_HPP
+ #define ROUTE_OPT_WORKFLOW_HPP
+ 
++#include <cstdlib>
++#include <iostream>
+ #include <set>
++#include <string>
+ #include "candidate_selector_controller.hpp"
+ 
+ namespace RouteOpt::Branching::BBT {
++    inline bool ifRootOnly() {
++        static const bool enabled = [] {
++            const char *raw = std::getenv("SAGSEP_ROOT_ONLY");
++            const bool on = raw != nullptr && std::string(raw) == "1";
++            if (on) std::cout << "[SAGSEP_ROOT_ONLY] enabled" << std::endl;
++            return on;
++        }();
++        return enabled;
++    }
++
+     /**
+      * @brief Solves the branch-and-bound tree (BBT).
+      *
+@@ -78,6 +91,23 @@ namespace RouteOpt::Branching::BBT {
+ 
+             if (checkIfTimeLimit(node, time_limit)) break;
+ 
++            if (tree_level == 0 && ifRootOnly()) {
++                const double root_value = valueExtractor(node);
++                const bool root_terminated = isTerminate(node);
++                updateBounds();
++                lb = std::min(root_value, lb);
++                ++num_nodes_explored;
++                delete node;
++                deleteTree();
++                std::cout << "[ROOT_DONE] lb=" << root_value
++                        << " time=" << glob_timer.getTime()
++                        << " ub=" << ub_ref.get()
++                        << " terminated=" << (root_terminated ? 1 : 0)
++                        << " node_seconds=" << eps
++                        << std::endl;
++                break;
++            }
++
+             // If the node remains active (not terminated), proceed with branching.
+             if (!isTerminate(node)) {
+                 // For non-root nodes, update the r_star value via LP testing if BKF controllers are available.

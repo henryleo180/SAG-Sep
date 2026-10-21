@@ -1,0 +1,9 @@
+instance,n,K,capacity,optimum,status,tolerance,source
+A034-02f,33,2,1000,1406,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A036-03f,35,3,1000,1644,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A039-03f,38,3,1000,1654,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A045-03f,44,3,1000,1740,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A048-03f,47,3,1000,1891,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A056-03f,55,3,1000,1739,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A065-03f,64,3,1000,1974,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1
+A071-03f,70,3,1000,2054,proved,0.5,Fischetti-Toth-Vigo 1994 via Pessoa-Poggi-Uchoa 2008 Table 1

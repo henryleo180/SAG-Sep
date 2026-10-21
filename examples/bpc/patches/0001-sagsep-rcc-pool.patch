@@ -1,0 +1,1036 @@
+diff --git a/packages/rounded_cap_cuts/CMakeLists.txt b/packages/rounded_cap_cuts/CMakeLists.txt
+index 86f6f75..2f3ff4f 100644
+--- a/packages/rounded_cap_cuts/CMakeLists.txt
++++ b/packages/rounded_cap_cuts/CMakeLists.txt
+@@ -16,4 +16,40 @@ file(GLOB_RECURSE ROUNDED_CAP_CUTS_SOURCES
+         ${CMAKE_CURRENT_SOURCE_DIR}/separation/src/*.cpp
+ )
+ 
+-target_sources(ROUNDED_CAP_CUTS_INCLUDES INTERFACE ${ROUNDED_CAP_CUTS_SOURCES})
+\ No newline at end of file
++target_sources(ROUNDED_CAP_CUTS_INCLUDES INTERFACE ${ROUNDED_CAP_CUTS_SOURCES})
++
++# ---------------------------------------------------------------------------
++# SAG-Sep engine (added by the SAG-Sep branch-price-and-cut case study)
++# ---------------------------------------------------------------------------
++set(SAGSEP_C "" CACHE PATH
++        "SAG-Sep engine tree; must contain include/sep_api.h")
++set(SAGSEP_LIB "" CACHE FILEPATH
++        "libsagsep.a, as produced by `make -C \${SAGSEP_C} lib`")
++set(ONNXRUNTIME_HOME "" CACHE PATH
++        "ONNX Runtime root; must contain include/onnxruntime_c_api.h and lib/libonnxruntime.so")
++
++if (NOT SAGSEP_C OR NOT EXISTS "${SAGSEP_C}/include/sep_api.h")
++    message(FATAL_ERROR
++            "SAGSEP_C must point at the SAG-Sep engine tree containing include/sep_api.h "
++            "(got \"${SAGSEP_C}\").")
++endif ()
++if (NOT SAGSEP_LIB OR NOT EXISTS "${SAGSEP_LIB}")
++    message(FATAL_ERROR
++            "SAGSEP_LIB must point at libsagsep.a; build it with "
++            "`make -C ${SAGSEP_C} lib GUROBI_HOME=... ONNXRUNTIME_HOME=...` (got \"${SAGSEP_LIB}\").")
++endif ()
++if (NOT ONNXRUNTIME_HOME OR NOT EXISTS "${ONNXRUNTIME_HOME}/lib/libonnxruntime.so")
++    message(FATAL_ERROR
++            "ONNXRUNTIME_HOME must point at an ONNX Runtime root with lib/libonnxruntime.so "
++            "(got \"${ONNXRUNTIME_HOME}\").")
++endif ()
++
++add_library(SAGSEP_ENGINE STATIC IMPORTED GLOBAL)
++set_target_properties(SAGSEP_ENGINE PROPERTIES
++        IMPORTED_LOCATION "${SAGSEP_LIB}"
++        INTERFACE_INCLUDE_DIRECTORIES "${SAGSEP_C}/include"
++        INTERFACE_LINK_LIBRARIES "${ONNXRUNTIME_HOME}/lib/libonnxruntime.so;m"
++        INTERFACE_LINK_OPTIONS "-Wl,-rpath,${ONNXRUNTIME_HOME}/lib"
++)
++
++target_link_libraries(ROUNDED_CAP_CUTS_INCLUDES INTERFACE SAGSEP_ENGINE)
+diff --git a/packages/rounded_cap_cuts/separation/src/generate_rcc.cpp b/packages/rounded_cap_cuts/separation/src/generate_rcc.cpp
+index ef98ba5..02e0301 100644
+--- a/packages/rounded_cap_cuts/separation/src/generate_rcc.cpp
++++ b/packages/rounded_cap_cuts/separation/src/generate_rcc.cpp
+@@ -5,6 +5,8 @@
+  * License: GPL-3.0
+  */
+ 
++/* --- Patched for the SAG-Sep branch-price-and-cut case study --- */
++
+ 
+ #include <vector>
+ #include <algorithm>
+@@ -16,6 +18,22 @@
+ #include "capsep.h"
+ #include "cnstrmgr.h"
+ 
++/* --- added by the SAG-Sep case study --------------------------------- */
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <chrono>
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <limits>
++#include <memory>
++#include <stdexcept>
++#include <string>
++
++#include "sep_api.h"
++/* --------------------------------------------------------------------- */
++
+ 
+ namespace RouteOpt::RCCs::Separation {
+     void getMap(const std::vector<double> &sol_x,
+@@ -53,83 +71,898 @@ namespace RouteOpt::RCCs::Separation {
+         }
+     }
+ 
+-    void RCCSeparationController::generateRCCs(int dim,
+-                                               double cap,
+-                                               const std::vector<double> &demand,
+-                                               bool if_keep_rcc,
+-                                               bool if_strengthen_rcc,
+-                                               const std::vector<double> &sol_x,
+-                                               const std::vector<SequenceInfo> &sols,
+-                                               const std::vector<Rcc> &existing_rccs,
+-                                               std::vector<Rcc> &new_rccs) {
+-        CnstrMgrPointer MyCutsCMP, MyOldCutsCMP;
+-        CMGR_CreateCMgr(&MyCutsCMP, MAX_NUM_OF_CUTS);
+-        CMGR_CreateCMgr(&MyOldCutsCMP, MAX_NUM_OF_CUTS);
+-        std::vector<int> solver_ind;
+-        std::vector<double> solver_val;
++    namespace {
++        /* ============================================================== *
++         * The switch
++         * ============================================================== */
++        enum class RccPool { CVRPSEP, SAGSEP_TTS };
++
++        RccPool parseRccPool() {
++            const char *raw = std::getenv("SAGSEP_RCC_POOL");
++            const std::string value = raw == nullptr ? std::string("cvrpsep") : std::string(raw);
++            if (value == "cvrpsep") {
++                std::cout << "[SAGSEP_RCC_POOL] pool=cvrpsep"
++                        << (raw == nullptr ? "  (default; SAGSEP_RCC_POOL is unset)" : "")
++                        << std::endl;
++                return RccPool::CVRPSEP;
++            }
++            if (value == "sagseptts") {
++                std::cout << "[SAGSEP_RCC_POOL] pool=sagseptts" << std::endl;
++                return RccPool::SAGSEP_TTS;
++            }
++            throw std::runtime_error(
++                "SAGSEP_RCC_POOL must be exactly \"cvrpsep\" or \"sagseptts\", got \"" + value + "\"");
++        }
+ 
+-        std::vector<int> edge_tail;
+-        std::vector<int> edge_head;
+-        std::vector<double> edge_value;
++        RccPool rccPool() {
++            static const RccPool pool = parseRccPool();
++            return pool;
++        }
+ 
+-        getMap(sol_x, sols, dim, edge_tail, edge_head, edge_value);
++        /* ============================================================== *
++         * Shared ground
++         * ============================================================== */
+ 
+-        char if_int_n_feasible;
+-        double max_vio = MAX_VIO;
++        constexpr double SUPPORT_TOLERANCE = 1e-8;
+ 
+-        CAPSEP_SeparateCapCuts(dim - 1, demand.data(), cap,
+-                               static_cast<int>(edge_tail.size()) - 1,
+-                               edge_tail.data(),
+-                               edge_head.data(), edge_value.data(),
+-                               MyOldCutsCMP,
+-                               MAX_NUM_OF_CUTS, TOLERANCE, TOLERANCE,
+-                               &if_int_n_feasible, &max_vio, MyCutsCMP);
++        constexpr double INTEGRALITY_TOLERANCE = TOLERANCE;
+ 
++        const char *callSiteName(const bool if_keep_rcc) {
++            return if_keep_rcc ? "incumbent" : "fractional";
++        }
+ 
+-        if (!MyCutsCMP->Size) goto QUIT;
++        /* ---------------------------------------------------------------
++         * Integer arithmetic
++         * --------------------------------------------------------------- */
++        std::int64_t ceilDivPositive(const std::int64_t numerator, const std::int64_t denominator) {
++            if (denominator <= 0) throw std::runtime_error("ceilDivPositive needs a positive divisor");
++            if (numerator < 0) throw std::runtime_error("ceilDivPositive needs a non-negative dividend");
++            return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
++        }
+ 
+-        new_rccs.clear();
+-        for (int i = 0; i < MyCutsCMP->Size; ++i) {
+-            Rcc rcc;
+-            auto &tmp_customerInfo = rcc.info_rcc_customer;
+-            for (int j = 1; j <= MyCutsCMP->CPL[i]->IntListSize; ++j) {
+-                tmp_customerInfo.emplace_back(MyCutsCMP->CPL[i]->IntList[j]);
++        std::int64_t checkedIntegral(const double value, const char *what) {
++            if (!std::isfinite(value)) {
++                throw std::runtime_error(std::string(what) + " is not finite");
++            }
++            if (value < -9.0e18 || value > 9.0e18) {
++                throw std::runtime_error(std::string(what) + " is outside the int64 range");
++            }
++            const auto rounded = static_cast<std::int64_t>(std::llround(value));
++            if (std::fabs(value - static_cast<double>(rounded)) > 1e-9) {
++                throw std::runtime_error(std::string(what) + " is not integral: "
++                                         + std::to_string(value));
++            }
++            return rounded;
++        }
++
++        std::int64_t checkedCapacity(const double cap) {
++            const std::int64_t capacity = checkedIntegral(cap, "capacity");
++            if (capacity <= 0) {
++                throw std::runtime_error("capacity must be positive, got " + std::to_string(capacity));
++            }
++            return capacity;
++        }
++
++        std::vector<std::int64_t> checkedDemand(const std::vector<double> &demand, const int dim) {
++            if (dim < 2) {
++                throw std::runtime_error("dim must be at least 2 (depot plus one customer), got "
++                                         + std::to_string(dim));
++            }
++            if (demand.size() != static_cast<std::size_t>(dim)) {
++                throw std::runtime_error("demand has " + std::to_string(demand.size())
++                                         + " entries for dim " + std::to_string(dim));
++            }
++            std::vector<std::int64_t> result;
++            result.reserve(demand.size());
++            for (std::size_t node = 0; node < demand.size(); ++node) {
++                const std::int64_t value =
++                        checkedIntegral(demand[node], ("demand[" + std::to_string(node) + "]").c_str());
++                if (value < 0) {
++                    throw std::runtime_error("demand[" + std::to_string(node) + "] is negative");
++                }
++                result.emplace_back(value);
++            }
++            if (result.front() != 0) {
++                throw std::runtime_error("demand[0] must be 0 (node 0 is the depot)");
++            }
++            return result;
++        }
++
++        std::int64_t addLoad(const std::int64_t total, const std::int64_t term) {
++            if (term < 0 || total > std::numeric_limits<std::int64_t>::max() - term) {
++                throw std::runtime_error("load accumulation overflowed");
++            }
++            return total + term;
++        }
++
++        /* ---------------------------------------------------------------
++         * The columns of the current solution
++         * --------------------------------------------------------------- */
++        void checkColumnSolution(const int dim,
++                                 const std::vector<double> &sol_x,
++                                 const std::vector<SequenceInfo> &sols) {
++            if (sol_x.size() != sols.size()) {
++                throw std::runtime_error("route values and columns have different sizes");
++            }
++            for (std::size_t column = 0; column < sols.size(); ++column) {
++                const double value = sol_x[column];
++                if (!std::isfinite(value)) {
++                    throw std::runtime_error("column " + std::to_string(column)
++                                             + " has a non-finite value");
++                }
++                if (value < -SUPPORT_TOLERANCE) {
++                    throw std::runtime_error("column " + std::to_string(column)
++                                             + " has a materially negative value: "
++                                             + std::to_string(value));
++                }
++                for (const int customer: sols[column].col_seq) {
++                    if (customer <= 0 || customer >= dim) {
++                        throw std::runtime_error(
++                            "column " + std::to_string(column)
++                            + " visits an out-of-range customer index " + std::to_string(customer));
++                    }
++                }
++            }
++        }
++
++        bool visitsACustomerTwice(const SequenceInfo &route, const int dim) {
++            std::vector<bool> seen(static_cast<std::size_t>(dim), false);
++            for (const int customer: route.col_seq) {
++                if (seen[static_cast<std::size_t>(customer)]) return true;
++                seen[static_cast<std::size_t>(customer)] = true;
++            }
++            return false;
++        }
++
++        bool isIntegralSolution(const std::vector<double> &sol_x) {
++            for (const double value: sol_x) {
++                if (std::fabs(value - std::round(value)) > INTEGRALITY_TOLERANCE) return false;
+             }
++            return true;
++        }
++
++        /* ---------------------------------------------------------------
++         * (S, k(S)) -> a RouteOpt Rcc
++         * --------------------------------------------------------------- */
++        Rcc toRouteOptCut(const std::vector<int> &customers,
++                          double k,
++                          int dim,
++                          bool if_strengthen_rcc,
++                          bool if_keep_rcc) {
++            Rcc rcc;
++            rcc.info_rcc_customer = customers;
++            const auto size = static_cast<double>(customers.size());
+ 
+-            if (tmp_customerInfo.size() <= dim / 2 || if_strengthen_rcc) {
++            if (static_cast<int>(customers.size()) <= dim / 2 || if_strengthen_rcc) {
+                 rcc.form_rcc = if_strengthen_rcc
+                                    ? static_cast<int>(RCCForm::RCC_FORM_3)
+                                    : static_cast<int>(RCCForm::RCC_FORM_1);
+-                rcc.rhs = MyCutsCMP->CPL[i]->RHS;
+-                if (if_strengthen_rcc) rcc.rhs = static_cast<double>(tmp_customerInfo.size()) - rcc.rhs;
++                rcc.rhs = if_strengthen_rcc ? k : size - k;
+             } else {
+                 rcc.form_rcc = static_cast<int>(RCCForm::RCC_FORM_2);
+-                rcc.rhs = dim - 1 - static_cast<double>(2 * tmp_customerInfo.size()) + MyCutsCMP->CPL[i]->RHS;
+-                auto &tmp_NoCustomerInfo = rcc.info_rcc_outside_customer;
+-                std::vector<bool> tmp(dim, false);
+-                for (int j: tmp_customerInfo) tmp[j] = true;
+-                for (int j = 1; j < dim; ++j) {
+-                    if (!tmp[j]) {
+-                        tmp_NoCustomerInfo.emplace_back(j);
+-                    }
++                const double internal_rhs = size - k;
++                rcc.rhs = dim - 1 - 2.0 * size + internal_rhs;
++                auto &outside = rcc.info_rcc_outside_customer;
++                std::vector<bool> selected(dim, false);
++                for (const int customer: customers) selected.at(customer) = true;
++                for (int customer = 1; customer < dim; ++customer) {
++                    if (!selected[customer]) outside.emplace_back(customer);
+                 }
+             }
+ 
+-            if (std::find(existing_rccs.begin(), existing_rccs.end(), rcc) != existing_rccs.end()) {
+-                continue;
++            const double recovered =
++                    rcc.form_rcc == static_cast<int>(RCCForm::RCC_FORM_1)
++                        ? size - rcc.rhs
++                        : rcc.form_rcc == static_cast<int>(RCCForm::RCC_FORM_2)
++                              ? static_cast<double>(rcc.info_rcc_outside_customer.size()) - rcc.rhs
++                              : rcc.rhs;
++            if (std::fabs(recovered - k) > 1e-9) {
++                throw std::runtime_error("RCC rhs does not recover k(S): form "
++                                         + std::to_string(rcc.form_rcc));
+             }
+ 
+             if (if_keep_rcc) rcc.if_keep = true;
++            return rcc;
++        }
++
++        /* ---------------------------------------------------------------
++         * The exact, pool-independent incumbent audit
++         * --------------------------------------------------------------- */
++        struct AuditReport {
++            bool integral{false};
++            int routes{0};
++            int overloaded{0};
++            int rows{0};
++        };
+ 
+-            new_rccs.emplace_back(rcc);
++        AuditReport auditIntegralRoutes(const int dim,
++                                        const std::int64_t capacity,
++                                        const std::vector<std::int64_t> &demand,
++                                        const bool if_keep_rcc,
++                                        const bool if_strengthen_rcc,
++                                        const std::vector<double> &sol_x,
++                                        const std::vector<SequenceInfo> &sols,
++                                        const std::vector<Rcc> &existing_rccs,
++                                        std::vector<Rcc> &audit_rccs) {
++            AuditReport report;
++            audit_rccs.clear();
++            report.integral = isIntegralSolution(sol_x);
++            if (!report.integral) return report;
++
++            for (std::size_t column = 0; column < sols.size(); ++column) {
++                if (std::round(sol_x[column]) < 1.0) continue;
++                ++report.routes;
++
++                if (visitsACustomerTwice(sols[column], dim)) {
++                    throw std::runtime_error(
++                        "an integral solution selects column " + std::to_string(column)
++                        + ", which visits a customer twice; its set-partitioning row would read 2");
++                }
++                std::vector<int> customers = sols[column].col_seq;
++                std::sort(customers.begin(), customers.end());
++                customers.erase(std::unique(customers.begin(), customers.end()), customers.end());
++                if (customers.empty()) continue;
++
++                std::int64_t load = 0;
++                for (const int customer: customers) {
++                    load = addLoad(load, demand[static_cast<std::size_t>(customer)]);
++                }
++                if (load <= capacity) continue;
++                ++report.overloaded;
++
++                const std::int64_t k = ceilDivPositive(load, capacity);
++                Rcc rcc = toRouteOptCut(customers, static_cast<double>(k), dim,
++                                        if_strengthen_rcc, if_keep_rcc);
++                if (std::find(existing_rccs.begin(), existing_rccs.end(), rcc) != existing_rccs.end()) {
++                    continue;
++                }
++                if (std::find(audit_rccs.begin(), audit_rccs.end(), rcc) != audit_rccs.end()) {
++                    continue;
++                }
++                audit_rccs.emplace_back(std::move(rcc));
++                ++report.rows;
++            }
++            return report;
+         }
+-    QUIT:
+-        for (int i = 0; i < MyCutsCMP->Size; ++i) {
+-            CMGR_MoveCnstr(MyCutsCMP, MyOldCutsCMP, i, 0);
++
++        /* ============================================================== *
++         * Pool 1: CVRPSEP -- upstream's generateRCCs body, unchanged
++         * ============================================================== */
++        void generateCvrpsepRCCs(int dim,
++                                 double cap,
++                                 const std::vector<double> &demand,
++                                 bool if_keep_rcc,
++                                 bool if_strengthen_rcc,
++                                 const std::vector<double> &sol_x,
++                                 const std::vector<SequenceInfo> &sols,
++                                 const std::vector<Rcc> &existing_rccs,
++                                 std::vector<Rcc> &new_rccs) {
++            new_rccs.clear();
++
++            CnstrMgrPointer MyCutsCMP, MyOldCutsCMP;
++            CMGR_CreateCMgr(&MyCutsCMP, MAX_NUM_OF_CUTS);
++            CMGR_CreateCMgr(&MyOldCutsCMP, MAX_NUM_OF_CUTS);
++            std::vector<int> solver_ind;
++            std::vector<double> solver_val;
++
++            std::vector<int> edge_tail;
++            std::vector<int> edge_head;
++            std::vector<double> edge_value;
++
++            int raw_cuts = 0;
++
++            getMap(sol_x, sols, dim, edge_tail, edge_head, edge_value);
++
++            char if_int_n_feasible;
++            double max_vio = MAX_VIO;
++
++            CAPSEP_SeparateCapCuts(dim - 1, demand.data(), cap,
++                                   static_cast<int>(edge_tail.size()) - 1,
++                                   edge_tail.data(),
++                                   edge_head.data(), edge_value.data(),
++                                   MyOldCutsCMP,
++                                   MAX_NUM_OF_CUTS, TOLERANCE, TOLERANCE,
++                                   &if_int_n_feasible, &max_vio, MyCutsCMP);
++
++            raw_cuts = MyCutsCMP->Size;
++
++            if (!MyCutsCMP->Size) goto QUIT;
++
++            for (int i = 0; i < MyCutsCMP->Size; ++i) {
++                Rcc rcc;
++                auto &tmp_customerInfo = rcc.info_rcc_customer;
++                for (int j = 1; j <= MyCutsCMP->CPL[i]->IntListSize; ++j) {
++                    tmp_customerInfo.emplace_back(MyCutsCMP->CPL[i]->IntList[j]);
++                }
++
++                if (tmp_customerInfo.size() <= dim / 2 || if_strengthen_rcc) {
++                    rcc.form_rcc = if_strengthen_rcc
++                                       ? static_cast<int>(RCCForm::RCC_FORM_3)
++                                       : static_cast<int>(RCCForm::RCC_FORM_1);
++                    rcc.rhs = MyCutsCMP->CPL[i]->RHS;
++                    if (if_strengthen_rcc) rcc.rhs = static_cast<double>(tmp_customerInfo.size()) - rcc.rhs;
++                } else {
++                    rcc.form_rcc = static_cast<int>(RCCForm::RCC_FORM_2);
++                    rcc.rhs = dim - 1 - static_cast<double>(2 * tmp_customerInfo.size()) + MyCutsCMP->CPL[i]->RHS;
++                    auto &tmp_NoCustomerInfo = rcc.info_rcc_outside_customer;
++                    std::vector<bool> tmp(dim, false);
++                    for (int j: tmp_customerInfo) tmp[j] = true;
++                    for (int j = 1; j < dim; ++j) {
++                        if (!tmp[j]) {
++                            tmp_NoCustomerInfo.emplace_back(j);
++                        }
++                    }
++                }
++
++                if (std::find(existing_rccs.begin(), existing_rccs.end(), rcc) != existing_rccs.end()) {
++                    continue;
++                }
++
++                if (if_keep_rcc) rcc.if_keep = true;
++
++                new_rccs.emplace_back(rcc);
++            }
++        QUIT:
++            for (int i = 0; i < MyCutsCMP->Size; ++i) {
++                CMGR_MoveCnstr(MyCutsCMP, MyOldCutsCMP, i, 0);
++            }
++            MyCutsCMP->Size = 0;
++
++            CMGR_FreeMemCMgr(&MyOldCutsCMP);
++            CMGR_FreeMemCMgr(&MyCutsCMP);
++
++            {
++                static long long round_counter = 0;
++                ++round_counter;
++                std::cout << "[RCC_ROUND] pool=cvrpsep"
++                        << " round=" << round_counter
++                        << " call_site=" << callSiteName(if_keep_rcc)
++                        << " form=" << (if_strengthen_rcc ? "strengthened" : "plain")
++                        << " node_pool=" << existing_rccs.size()
++                        << " int_n_feasible=" << static_cast<int>(if_int_n_feasible != 0)
++                        << " proposed=" << raw_cuts
++                        << " returned=" << new_rccs.size()
++                        << " max_violation=" << (raw_cuts > 0 ? max_vio : 0.0)
++                        << std::endl;
++            }
++        }
++
++        /* ============================================================== *
++         * Pool 2: SAG-Sep, through the separate-once API of <sep_api.h>
++         * ============================================================== */
++
++        const char *requiredEnv(const char *name) {
++            const char *value = std::getenv(name);
++            if (value == nullptr || *value == '\0') {
++                throw std::runtime_error(
++                    std::string(name) + " must be set when SAGSEP_RCC_POOL=sagseptts");
++            }
++            return value;
++        }
++
++        /* ---------------------------------------------------------------
++         * cross_depot
++         * --------------------------------------------------------------- */
++        sag_separator_cross_depot parseCrossDepot() {
++            const std::string value = requiredEnv("SAGSEP_CROSS_DEPOT");
++            if (value == "0") return SAG_CROSS_DEPOT_DISABLED;
++            if (value == "1") return SAG_CROSS_DEPOT_ENABLED;
++            throw std::runtime_error(
++                "SAGSEP_CROSS_DEPOT must be exactly \"0\" (disabled) or \"1\" (enabled), got \""
++                + value + "\"");
+         }
+-        MyCutsCMP->Size = 0;
+ 
+-        CMGR_FreeMemCMgr(&MyOldCutsCMP);
+-        CMGR_FreeMemCMgr(&MyCutsCMP);
++        /* ---------------------------------------------------------------
++         * The instance name
++         * --------------------------------------------------------------- */
++
++        constexpr std::size_t SAGSEP_NAME_MAX = 128;
++
++        bool vrpIsSpace(unsigned char c) {
++            return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
++                   || c == 0x1c || c == 0x1d || c == 0x1e || c == 0x1f;
++        }
++
++        std::string vrpStrip(const std::string &s) {
++            std::size_t b = 0, e = s.size();
++            while (b < e && vrpIsSpace(static_cast<unsigned char>(s[b]))) ++b;
++            while (e > b && vrpIsSpace(static_cast<unsigned char>(s[e - 1]))) --e;
++            return s.substr(b, e - b);
++        }
++
++        std::string upperAscii(std::string s) {
++            for (char &c: s) {
++                if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
++            }
++            return s;
++        }
++
++        bool startsWithUpper(const std::string &line, const std::string &prefix) {
++            return line.size() >= prefix.size() && upperAscii(line.substr(0, prefix.size())) == prefix;
++        }
++
++        std::string vrpPathStem(const std::string &path) {
++            const std::size_t slash = path.find_last_of("/\\");
++            const std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
++            const std::size_t dot = base.find_last_of('.');
++            return (dot == std::string::npos || dot == 0) ? base : base.substr(0, dot);
++        }
++
++        void checkInstanceName(const std::string &name, const std::string &origin);
++
++        std::string instanceNameFromVrpFile(const std::string &path) {
++            std::ifstream in(path);
++            if (!in) throw std::runtime_error("SAGSEP_INSTANCE_FILE cannot be opened: " + path);
++
++            std::string name = vrpPathStem(path);
++            enum { HEADERS, COORDS, DEMANDS, DEPOT } section = HEADERS;
++            std::string raw;
++            while (std::getline(in, raw)) {
++                if (!raw.empty() && raw.back() == '\r') raw.pop_back();
++                const std::string line = vrpStrip(raw);
++                if (line.empty()) continue;
++
++                if (startsWithUpper(line, "NODE_COORD_SECTION")) { section = COORDS; continue; }
++                if (startsWithUpper(line, "DEMAND_SECTION")) { section = DEMANDS; continue; }
++                if (startsWithUpper(line, "DEPOT_SECTION")) { section = DEPOT; continue; }
++                if (startsWithUpper(line, "EOF")) break;
++
++                if (section == DEPOT && line.size() >= 2 && line[0] == '-' && line[1] == '1') {
++                    section = HEADERS;
++                    continue;
++                }
++                if (section != HEADERS) continue;
++
++                const std::size_t colon = line.find(':');
++                if (colon == std::string::npos) continue;
++                if (upperAscii(vrpStrip(line.substr(0, colon))) != "NAME") continue;
++                name = vrpStrip(line.substr(colon + 1));
++            }
++
++            checkInstanceName(name, "the NAME header of " + path);
++            return name;
++        }
++
++        void checkInstanceName(const std::string &name, const std::string &origin) {
++            if (name.empty()) {
++                throw std::runtime_error("empty SAG-Sep instance name from " + origin);
++            }
++            if (name.size() >= SAGSEP_NAME_MAX) {
++                throw std::runtime_error("SAG-Sep instance name is longer than 127 bytes: " + name);
++            }
++            for (std::size_t i = 0; i < name.size(); ++i) {
++                const unsigned char ch = static_cast<unsigned char>(name[i]);
++                if (ch < 0x20 || ch >= 0x7f) {
++                    throw std::runtime_error(
++                        origin + " contains a non-printable byte at position "
++                        + std::to_string(i) + "; SAG-Sep hashes the name byte by byte and refuses it");
++                }
++            }
++        }
++
++        std::string resolveInstanceName() {
++            if (const char *explicit_name = std::getenv("SAGSEP_INSTANCE_NAME")) {
++                if (*explicit_name != '\0') {
++                    const std::string name(explicit_name);
++                    checkInstanceName(name, "SAGSEP_INSTANCE_NAME");
++                    return name;
++                }
++            }
++            return instanceNameFromVrpFile(requiredEnv("SAGSEP_INSTANCE_FILE"));
++        }
++
++        /* ---------------------------------------------------------------
++         * The per-instance handle
++         * --------------------------------------------------------------- */
++
++        struct SagsepDeleter {
++            void operator()(sag_separator *value) const { sag_separator_destroy(value); }
++        };
++
++        using SagsepHandle = std::unique_ptr<sag_separator, SagsepDeleter>;
++
++        std::size_t arenaBytes() {
++            const char *mib = std::getenv("SAGSEP_ARENA_MIB");
++            if (mib == nullptr || *mib == '\0') return 0;
++            const std::string text(mib);
++            if (text.find_first_not_of("0123456789") != std::string::npos) {
++                throw std::runtime_error("SAGSEP_ARENA_MIB must be decimal digits only, got \""
++                                         + text + "\"");
++            }
++            unsigned long long value = 0;
++            std::size_t consumed = 0;
++            try {
++                value = std::stoull(text, &consumed);
++            } catch (const std::exception &) {
++                throw std::runtime_error("SAGSEP_ARENA_MIB is not a number: \"" + text + "\"");
++            }
++            if (consumed != text.size()) {
++                throw std::runtime_error("SAGSEP_ARENA_MIB has trailing characters: \"" + text + "\"");
++            }
++            if (value == 0 || value > (1ULL << 20)) {
++                throw std::runtime_error("SAGSEP_ARENA_MIB is out of range: " + text);
++            }
++            return static_cast<std::size_t>(value) << 20;
++        }
++
++        /* ---------------------------------------------------------------
++         * The per-instance handle: identity and creation
++         * --------------------------------------------------------------- */
++        struct SagsepIdentity {
++            int dim{-1};
++            std::int64_t capacity{-1};
++            std::vector<std::int64_t> demand{};
++            std::string instance_name{};
++            std::string model{};
++            std::string preset{};
++            std::string provider{};
++            int cross_depot{-1};
++            std::size_t arena_bytes{0};
++
++            bool operator==(const SagsepIdentity &other) const {
++                return dim == other.dim && capacity == other.capacity && demand == other.demand
++                       && instance_name == other.instance_name && model == other.model
++                       && preset == other.preset && provider == other.provider
++                       && cross_depot == other.cross_depot && arena_bytes == other.arena_bytes;
++            }
++        };
++
++        double last_init_seconds = 0.0;
++
++        sag_separator &sagsepSeparator(const int dim,
++                                       const std::int64_t capacity,
++                                       const std::vector<std::int64_t> &demand) {
++            static SagsepHandle handle;
++            static SagsepIdentity identity;
++
++            SagsepIdentity wanted;
++            wanted.dim = dim;
++            wanted.capacity = capacity;
++            wanted.demand = demand;
++            wanted.instance_name = resolveInstanceName();
++            wanted.model = requiredEnv("SAGSEP_MODEL");
++            wanted.preset = requiredEnv("SAGSEP_PRESET");
++            wanted.provider = requiredEnv("SAGSEP_PROVIDER");
++            wanted.cross_depot = static_cast<int>(parseCrossDepot());
++            wanted.arena_bytes = arenaBytes();
++
++            if (!handle) {
++                sag_separator_options options{};
++                options.model_path = wanted.model.c_str();
++                options.provider = wanted.provider.c_str();
++                options.instance_name = wanted.instance_name.c_str();
++                options.preset = wanted.preset.c_str();
++                options.cross_depot = static_cast<sag_separator_cross_depot>(wanted.cross_depot);
++                options.n_nodes = dim;
++                options.capacity = capacity;
++                options.demand = wanted.demand.data();
++                options.iteration_arena_bytes = wanted.arena_bytes;
++
++                const auto started = std::chrono::steady_clock::now();
++                sag_separator *created = sag_separator_create(&options);
++                last_init_seconds = std::chrono::duration<double>(
++                    std::chrono::steady_clock::now() - started).count();
++                if (created == nullptr) {
++                    throw std::runtime_error(
++                        "sag_separator_create returned null for instance \"" + wanted.instance_name
++                        + "\" with model \"" + wanted.model + "\"");
++                }
++                handle.reset(created);
++                identity = wanted;
++                std::cout << "[SAGSEP_INIT] " << sag_separator_description(handle.get())
++                        << " t_init=" << last_init_seconds << std::endl;
++            } else if (!(identity == wanted)) {
++                throw std::runtime_error(
++                    "one RouteOpt process must solve exactly one instance with one separator "
++                    "configuration when SAGSEP_RCC_POOL=sagseptts; the instance or a SAGSEP_* "
++                    "option changed after the separator was created");
++            }
++            return *handle;
++        }
++
++        /* ---------------------------------------------------------------
++         * The blocked set
++         * --------------------------------------------------------------- */
++        void installBlockedSet(sag_separator &separator,
++                               const int dim,
++                               const std::vector<Rcc> &existing_rccs) {
++            std::vector<std::int64_t> indptr;
++            std::vector<std::int32_t> customers;
++            indptr.reserve(existing_rccs.size() + 1);
++            indptr.emplace_back(0);
++
++            std::vector<int> subset;
++            for (const auto &rcc: existing_rccs) {
++                subset = rcc.info_rcc_customer;
++                std::sort(subset.begin(), subset.end());
++                subset.erase(std::unique(subset.begin(), subset.end()), subset.end());
++                if (subset.empty()) continue;
++                if (subset.front() <= 0 || subset.back() >= dim) {
++                    throw std::runtime_error(
++                        "an RCC in the node's pool holds a customer outside 1..dim-1");
++                }
++                for (const int customer: subset) {
++                    customers.emplace_back(static_cast<std::int32_t>(customer));
++                }
++                indptr.emplace_back(static_cast<std::int64_t>(customers.size()));
++            }
++
++            const auto rows = static_cast<std::int64_t>(indptr.size()) - 1;
++            sag_separator_set_blocked(&separator, rows, indptr.data(),
++                                      customers.empty() ? nullptr : customers.data());
++        }
++
++        /* ---------------------------------------------------------------
++         * The two-index support of the column solution
++         * --------------------------------------------------------------- */
++        struct UndirectedSupport {
++            std::vector<std::int64_t> u;
++            std::vector<std::int64_t> v;
++            std::vector<double> x;
++        };
++
++        UndirectedSupport undirectedSupport(const int dim,
++                                            const std::vector<double> &sol_x,
++                                            const std::vector<SequenceInfo> &sols) {
++            std::vector<int> edge_tail, edge_head;
++            std::vector<double> edge_value;
++            getMap(sol_x, sols, dim, edge_tail, edge_head, edge_value);
++            if (edge_tail.size() != edge_head.size() || edge_tail.size() != edge_value.size()) {
++                throw std::runtime_error("getMap returned ragged edge arrays");
++            }
++
++            std::vector<std::pair<std::pair<int, int>, double> > entries;
++            entries.reserve(edge_tail.size());
++            for (std::size_t e = 1; e < edge_tail.size(); ++e) {
++                const int tail = edge_tail[e] == dim ? 0 : edge_tail[e];
++                const int head = edge_head[e];
++                const double value = edge_value[e];
++                if (!std::isfinite(value)) {
++                    throw std::runtime_error("getMap produced a non-finite support value");
++                }
++                if (value < -SUPPORT_TOLERANCE) {
++                    throw std::runtime_error("getMap produced a materially negative support value: "
++                                             + std::to_string(value));
++                }
++                if (!(value > SUPPORT_TOLERANCE)) continue;
++                if (tail < 0 || head <= tail || head >= dim) {
++                    throw std::runtime_error("getMap produced an out-of-range edge ("
++                                             + std::to_string(tail) + ", " + std::to_string(head) + ")");
++                }
++                entries.emplace_back(std::make_pair(tail, head), value);
++            }
++            std::sort(entries.begin(), entries.end(),
++                      [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
++
++            UndirectedSupport support;
++            support.u.reserve(entries.size());
++            support.v.reserve(entries.size());
++            support.x.reserve(entries.size());
++            for (const auto &entry: entries) {
++                if (!support.u.empty()
++                    && std::make_pair(static_cast<int>(support.u.back()),
++                                      static_cast<int>(support.v.back())) == entry.first) {
++                    throw std::runtime_error("getMap produced a duplicate undirected edge");
++                }
++                support.u.emplace_back(entry.first.first);
++                support.v.emplace_back(entry.first.second);
++                support.x.emplace_back(entry.second);
++            }
++            return support;
++        }
++
++        void checkReturnedCuts(const sag_separator_cuts &cuts, const int dim) {
++            if (cuts.rows < 0) {
++                throw std::runtime_error("SAG-Sep returned a negative row count");
++            }
++            if (cuts.rows == 0) return;
++            if (cuts.indptr == nullptr || cuts.customers == nullptr
++                || cuts.rhs == nullptr || cuts.violation == nullptr) {
++                throw std::runtime_error("SAG-Sep returned null arrays for a non-empty cut batch");
++            }
++            if (cuts.indptr[0] != 0) {
++                throw std::runtime_error("SAG-Sep returned an indptr that does not start at 0");
++            }
++            for (std::int64_t row = 0; row < cuts.rows; ++row) {
++                const std::int64_t begin = cuts.indptr[row];
++                const std::int64_t end = cuts.indptr[row + 1];
++                if (end < begin) {
++                    throw std::runtime_error("SAG-Sep returned a non-monotone indptr at row "
++                                             + std::to_string(row));
++                }
++                if (end == begin) {
++                    throw std::runtime_error("SAG-Sep returned an empty customer set at row "
++                                             + std::to_string(row));
++                }
++                for (std::int64_t k = begin; k < end; ++k) {
++                    const std::int32_t customer = cuts.customers[k];
++                    if (customer <= 0 || customer >= dim) {
++                        throw std::runtime_error(
++                            "SAG-Sep returned a customer index outside 1..dim-1 at row "
++                            + std::to_string(row));
++                    }
++                    if (k > begin && customer <= cuts.customers[k - 1]) {
++                        throw std::runtime_error(
++                            "SAG-Sep returned a customer set that is not strictly increasing at row "
++                            + std::to_string(row));
++                    }
++                }
++                if (!std::isfinite(cuts.rhs[row]) || !std::isfinite(cuts.violation[row])) {
++                    throw std::runtime_error("SAG-Sep returned a non-finite rhs or violation at row "
++                                             + std::to_string(row));
++                }
++            }
++        }
++
++        void generateSagsepRCCs(const int dim,
++                                const std::int64_t capacity,
++                                const std::vector<std::int64_t> &demand,
++                                const bool if_keep_rcc,
++                                const bool if_strengthen_rcc,
++                                const std::vector<double> &sol_x,
++                                const std::vector<SequenceInfo> &sols,
++                                const std::vector<Rcc> &existing_rccs,
++                                std::vector<Rcc> &new_rccs) {
++            new_rccs.clear();
++
++            last_init_seconds = 0.0;
++            sag_separator &separator = sagsepSeparator(dim, capacity, demand);
++            const double init_seconds = last_init_seconds;
++            installBlockedSet(separator, dim, existing_rccs);
++
++            const UndirectedSupport support = undirectedSupport(dim, sol_x, sols);
++
++            static long long round_counter = 0;
++            ++round_counter;
++
++            if (support.x.empty()) {
++                std::cout << "[RCC_ROUND] pool=sagseptts"
++                        << " round=" << round_counter
++                        << " call_site=" << callSiteName(if_keep_rcc)
++                        << " form=" << (if_strengthen_rcc ? "strengthened" : "plain")
++                        << " node_pool=" << existing_rccs.size()
++                        << " empty_support=1"
++                        << " iteration=0 replicas=0 support=0 raw=0 unique=0"
++                        << " blocked_keys=0 blocked=0 proposed=0 admitted=0 duplicate=0"
++                        << " returned=0 max_violation=0"
++                        << " t_init=" << init_seconds
++                        << " t_forward=0 t_total=0"
++                        << std::endl;
++                return;
++            }
++
++            sag_separator_cuts cuts{};
++            sag_separator_stats stats{};
++            const std::int64_t returned_rows =
++                    sag_separator_separate(&separator,
++                                           static_cast<std::int64_t>(support.x.size()),
++                                           support.u.data(), support.v.data(), support.x.data(),
++                                           &cuts, &stats);
++            if (returned_rows != cuts.rows) {
++                throw std::runtime_error("SAG-Sep's return value and cuts.rows disagree");
++            }
++            checkReturnedCuts(cuts, dim);
++
++            std::vector<std::int64_t> committed_rows;
++            committed_rows.reserve(static_cast<std::size_t>(cuts.rows));
++            new_rccs.reserve(static_cast<std::size_t>(cuts.rows));
++
++            std::int64_t admitted = 0, duplicates = 0;
++            double max_violation = 0.0;
++
++            for (std::int64_t row = 0; row < cuts.rows; ++row) {
++                if (!(cuts.violation[row] > stats.min_violation)) continue;
++                ++admitted;
++
++                const std::int64_t begin = cuts.indptr[row];
++                const std::int64_t end = cuts.indptr[row + 1];
++                const std::vector<int> customers(cuts.customers + begin, cuts.customers + end);
++
++                std::int64_t load = 0;
++                for (const int customer: customers) {
++                    load = addLoad(load, demand[static_cast<std::size_t>(customer)]);
++                }
++                const std::int64_t expected_k = ceilDivPositive(load, capacity);
++                const std::int64_t reported_k = checkedIntegral(cuts.rhs[row], "SAG-Sep rhs");
++                if (expected_k != reported_k) {
++                    throw std::runtime_error("SAG-Sep rhs is not ceil(d(S)/Q): got "
++                                             + std::to_string(reported_k) + ", expected "
++                                             + std::to_string(expected_k));
++                }
++
++                Rcc rcc = toRouteOptCut(customers, static_cast<double>(expected_k), dim,
++                                        if_strengthen_rcc, if_keep_rcc);
++
++                const bool already_in_model =
++                        std::find(existing_rccs.begin(), existing_rccs.end(), rcc) != existing_rccs.end()
++                        || std::find(new_rccs.begin(), new_rccs.end(), rcc) != new_rccs.end();
++
++                committed_rows.emplace_back(row);
++
++                if (already_in_model) {
++                    ++duplicates;
++                    continue;
++                }
++                max_violation = std::max(max_violation, cuts.violation[row]);
++                new_rccs.emplace_back(std::move(rcc));
++            }
++
++            sag_separator_commit(&separator,
++                                 committed_rows.empty() ? nullptr : committed_rows.data(),
++                                 static_cast<std::int64_t>(committed_rows.size()));
++
++            std::cout << "[RCC_ROUND] pool=sagseptts"
++                    << " round=" << round_counter
++                    << " call_site=" << callSiteName(if_keep_rcc)
++                    << " form=" << (if_strengthen_rcc ? "strengthened" : "plain")
++                    << " node_pool=" << existing_rccs.size()
++                    << " iteration=" << stats.iteration
++                    << " replicas=" << stats.replicas
++                    << " support=" << stats.support_edges
++                    << " raw=" << stats.raw_candidates
++                    << " unique=" << stats.unique_candidates
++                    << " blocked_keys=" << stats.blocked_keys
++                    << " blocked=" << stats.blocked_candidates
++                    << " proposed=" << stats.materialized_cuts
++                    << " admitted=" << admitted
++                    << " duplicate=" << duplicates
++                    << " returned=" << new_rccs.size()
++                    << " max_violation=" << max_violation
++                    << " t_init=" << init_seconds
++                    << " t_forward=" << stats.forward_seconds
++                    << " t_total=" << stats.total_seconds
++                    << std::endl;
++        }
++    }
++
++    void RCCSeparationController::generateRCCs(int dim,
++                                               double cap,
++                                               const std::vector<double> &demand,
++                                               bool if_keep_rcc,
++                                               bool if_strengthen_rcc,
++                                               const std::vector<double> &sol_x,
++                                               const std::vector<SequenceInfo> &sols,
++                                               const std::vector<Rcc> &existing_rccs,
++                                               std::vector<Rcc> &new_rccs) {
++        new_rccs.clear();
++
++        const RccPool pool = rccPool();
++
++        const std::int64_t capacity = checkedCapacity(cap);
++        const std::vector<std::int64_t> demand_i = checkedDemand(demand, dim);
++        checkColumnSolution(dim, sol_x, sols);
++
++        std::vector<Rcc> audit_rccs;
++        const AuditReport audit = auditIntegralRoutes(dim, capacity, demand_i, if_keep_rcc,
++                                                     if_strengthen_rcc, sol_x, sols,
++                                                     existing_rccs, audit_rccs);
++        std::cout << "[RCC_AUDIT]"
++                << " call_site=" << callSiteName(if_keep_rcc)
++                << " pool=" << (pool == RccPool::CVRPSEP ? "cvrpsep" : "sagseptts")
++                << " integral=" << (audit.integral ? 1 : 0)
++                << " routes=" << audit.routes
++                << " overloaded=" << audit.overloaded
++                << " rows=" << audit.rows
++                << std::endl;
++
++        std::vector<Rcc> pool_rccs;
++        switch (pool) {
++            case RccPool::CVRPSEP:
++                generateCvrpsepRCCs(dim, cap, demand, if_keep_rcc, if_strengthen_rcc,
++                                    sol_x, sols, existing_rccs, pool_rccs);
++                break;
++            case RccPool::SAGSEP_TTS:
++                generateSagsepRCCs(dim, capacity, demand_i, if_keep_rcc, if_strengthen_rcc,
++                                   sol_x, sols, existing_rccs, pool_rccs);
++                break;
++            default:
++                throw std::runtime_error("unreachable SAGSEP_RCC_POOL value");
++        }
++
++        new_rccs = std::move(audit_rccs);
++        for (auto &rcc: pool_rccs) {
++            if (std::find(new_rccs.begin(), new_rccs.end(), rcc) != new_rccs.end()) continue;
++            new_rccs.emplace_back(std::move(rcc));
++        }
+     }
+ }
